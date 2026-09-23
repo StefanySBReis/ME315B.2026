@@ -1,0 +1,444 @@
+---
+title: "lab07"
+author: "Stefany Reis"
+format: typst
+editor: visual
+---
+
+1.  Baixe o arquivo uwmadison.sqlite3. Conecte-se a ele usando o pacote RSQLite, armazenando a conexão em uma variável conn.
+
+```{r}
+library(RSQLite)
+
+path <- "."
+
+fname <- file.path(path, "database.sqlite3")
+
+fname
+
+conn <- dbConnect(SQLite(),"database.sqlite3")
+
+dbListTables(conn)
+```
+
+2.  Quem são e quantos são os professores que lecionaram disciplinas cujo tópico era estatística (subjects.abbreviation='STAT').
+
+```{r}
+professores <- dbGetQuery(
+  conn,
+  "
+  SELECT DISTINCT i.name FROM subjects AS s
+  INNER JOIN subject_memberships AS sm ON sm.subject_code = s.code
+  INNER JOIN course_offerings AS co ON co.uuid = sm.course_offering_uuid
+  INNER JOIN sections AS sec ON sec.course_offering_uuid = co.uuid
+  INNER JOIN teachings AS t ON t.section_uuid = sec.uuid
+  INNER JOIN instructors AS i ON i.id = t.instructor_id
+  WHERE s.abbreviation = 'STAT'
+  ORDER BY i.name;
+  "
+)
+
+professores
+
+nrow(professores)
+```
+
+3.  O GPA americano é definido numa escala de 0 a 4, em que A = 4, AB = 3.5, B = 3, BC = 2.5, C = 2, D = 1 e F = 0. Determinando a nota média de cada oferecimento pela ponderação da quantidade de alunos em cada extrato com os valores numéricos de cada conceito, indique (no que se referente a disciplinas no assunto de estatística):
+
+```{r}
+gpa_oferecimentos <- dbGetQuery(
+  conn,
+  "
+  WITH stat_offerings AS (
+    SELECT DISTINCT
+        sm.course_offering_uuid
+    FROM subject_memberships AS sm
+    INNER JOIN subjects AS s
+        ON s.code = sm.subject_code
+    WHERE s.abbreviation = 'STAT'
+  )
+
+  SELECT
+      gd.course_offering_uuid,
+
+      SUM(
+          CAST(COALESCE(gd.a_count, '0') AS REAL) * 4 +
+          CAST(COALESCE(gd.ab_count, '0') AS REAL) * 3.5 +
+          CAST(COALESCE(gd.b_count, '0') AS REAL) * 3 +
+          CAST(COALESCE(gd.bc_count, '0') AS REAL) * 2.5 +
+          CAST(COALESCE(gd.c_count, '0') AS REAL) * 2 +
+          CAST(COALESCE(gd.d_count, '0') AS REAL) * 1 +
+          CAST(COALESCE(gd.f_count, '0') AS REAL) * 0
+      )
+      /
+      NULLIF(
+          SUM(
+              CAST(COALESCE(gd.a_count, '0') AS REAL) +
+              CAST(COALESCE(gd.ab_count, '0') AS REAL) +
+              CAST(COALESCE(gd.b_count, '0') AS REAL) +
+              CAST(COALESCE(gd.bc_count, '0') AS REAL) +
+              CAST(COALESCE(gd.c_count, '0') AS REAL) +
+              CAST(COALESCE(gd.d_count, '0') AS REAL) +
+              CAST(COALESCE(gd.f_count, '0') AS REAL)
+          ),
+          0
+      ) AS gpa
+
+  FROM grade_distributions AS gd
+
+  INNER JOIN stat_offerings AS so
+      ON so.course_offering_uuid = gd.course_offering_uuid
+
+  GROUP BY gd.course_offering_uuid
+  "
+)
+
+gpa_oferecimentos
+```
+Quem é o professor mais difícil?
+
+```{r}
+professor_dificil <- dbGetQuery(
+  conn,
+  "
+  WITH stat_offerings AS (
+    SELECT DISTINCT sm.course_offering_uuid
+    FROM subject_memberships AS sm
+    INNER JOIN subjects AS s
+      ON s.code = sm.subject_code
+    WHERE s.abbreviation = 'STAT'
+  ),
+
+  gpa_oferecimentos AS (
+    SELECT
+        gd.course_offering_uuid,
+
+        SUM(
+            CAST(COALESCE(gd.a_count, '0') AS REAL) * 4 +
+            CAST(COALESCE(gd.ab_count, '0') AS REAL) * 3.5 +
+            CAST(COALESCE(gd.b_count, '0') AS REAL) * 3 +
+            CAST(COALESCE(gd.bc_count, '0') AS REAL) * 2.5 +
+            CAST(COALESCE(gd.c_count, '0') AS REAL) * 2 +
+            CAST(COALESCE(gd.d_count, '0') AS REAL)
+        )
+        /
+        NULLIF(
+            SUM(
+                CAST(COALESCE(gd.a_count, '0') AS REAL) +
+                CAST(COALESCE(gd.ab_count, '0') AS REAL) +
+                CAST(COALESCE(gd.b_count, '0') AS REAL) +
+                CAST(COALESCE(gd.bc_count, '0') AS REAL) +
+                CAST(COALESCE(gd.c_count, '0') AS REAL) +
+                CAST(COALESCE(gd.d_count, '0') AS REAL) +
+                CAST(COALESCE(gd.f_count, '0') AS REAL)
+            ),
+            0
+        ) AS gpa
+
+    FROM grade_distributions AS gd
+    INNER JOIN stat_offerings AS so
+      ON so.course_offering_uuid = gd.course_offering_uuid
+
+    GROUP BY gd.course_offering_uuid
+  ),
+
+  professor_oferecimento AS (
+    SELECT DISTINCT
+        i.id AS instructor_id,
+        i.name,
+        go.course_offering_uuid,
+        go.gpa
+
+    FROM gpa_oferecimentos AS go
+    INNER JOIN sections AS sec
+      ON sec.course_offering_uuid = go.course_offering_uuid
+    INNER JOIN teachings AS t
+      ON t.section_uuid = sec.uuid
+    INNER JOIN instructors AS i
+      ON i.id = t.instructor_id
+
+    WHERE go.gpa IS NOT NULL
+  ),
+
+  professor_gpa AS (
+    SELECT
+        instructor_id,
+        name,
+        AVG(gpa) AS gpa_medio
+    FROM professor_oferecimento
+    GROUP BY instructor_id, name
+  )
+
+  SELECT
+      name,
+      gpa_medio
+  FROM professor_gpa
+  WHERE gpa_medio = (SELECT MIN(gpa_medio) FROM professor_gpa)
+  "
+)
+
+professor_dificil
+```
+
+Quem é o professor mais fácil?
+
+```{r}
+professor_facil <- dbGetQuery(
+  conn,
+  "
+  WITH stat_offerings AS (
+    SELECT DISTINCT sm.course_offering_uuid
+    FROM subject_memberships AS sm
+    INNER JOIN subjects AS s
+      ON s.code = sm.subject_code
+    WHERE s.abbreviation = 'STAT'
+  ),
+
+  gpa_oferecimentos AS (
+    SELECT
+        gd.course_offering_uuid,
+
+        SUM(
+            CAST(COALESCE(gd.a_count, '0') AS REAL) * 4 +
+            CAST(COALESCE(gd.ab_count, '0') AS REAL) * 3.5 +
+            CAST(COALESCE(gd.b_count, '0') AS REAL) * 3 +
+            CAST(COALESCE(gd.bc_count, '0') AS REAL) * 2.5 +
+            CAST(COALESCE(gd.c_count, '0') AS REAL) * 2 +
+            CAST(COALESCE(gd.d_count, '0') AS REAL)
+        )
+        /
+        NULLIF(
+            SUM(
+                CAST(COALESCE(gd.a_count, '0') AS REAL) +
+                CAST(COALESCE(gd.ab_count, '0') AS REAL) +
+                CAST(COALESCE(gd.b_count, '0') AS REAL) +
+                CAST(COALESCE(gd.bc_count, '0') AS REAL) +
+                CAST(COALESCE(gd.c_count, '0') AS REAL) +
+                CAST(COALESCE(gd.d_count, '0') AS REAL) +
+                CAST(COALESCE(gd.f_count, '0') AS REAL)
+            ),
+            0
+        ) AS gpa
+
+    FROM grade_distributions AS gd
+    INNER JOIN stat_offerings AS so
+      ON so.course_offering_uuid = gd.course_offering_uuid
+
+    GROUP BY gd.course_offering_uuid
+  ),
+
+  professor_oferecimento AS (
+    SELECT DISTINCT
+        i.id AS instructor_id,
+        i.name,
+        go.course_offering_uuid,
+        go.gpa
+
+    FROM gpa_oferecimentos AS go
+    INNER JOIN sections AS sec
+      ON sec.course_offering_uuid = go.course_offering_uuid
+    INNER JOIN teachings AS t
+      ON t.section_uuid = sec.uuid
+    INNER JOIN instructors AS i
+      ON i.id = t.instructor_id
+
+    WHERE go.gpa IS NOT NULL
+  ),
+
+  professor_gpa AS (
+    SELECT
+        instructor_id,
+        name,
+        AVG(gpa) AS gpa_medio
+    FROM professor_oferecimento
+    GROUP BY instructor_id, name
+  )
+
+  SELECT
+      name,
+      gpa_medio
+  FROM professor_gpa
+  WHERE gpa_medio = (SELECT MAX(gpa_medio) FROM professor_gpa)
+  "
+)
+
+professor_facil
+```
+
+Qual é a disciplina mais difícil?
+
+```{r}
+disciplina_dificil <- dbGetQuery(
+  conn,
+  "
+  WITH stat_offerings AS (
+    SELECT DISTINCT
+        sm.course_offering_uuid
+    FROM subject_memberships AS sm
+    INNER JOIN subjects AS s
+      ON s.code = sm.subject_code
+    WHERE s.abbreviation = 'STAT'
+  ),
+
+  gpa_oferecimentos AS (
+    SELECT
+        gd.course_offering_uuid,
+
+        SUM(
+            CAST(COALESCE(gd.a_count, '0') AS REAL) * 4 +
+            CAST(COALESCE(gd.ab_count, '0') AS REAL) * 3.5 +
+            CAST(COALESCE(gd.b_count, '0') AS REAL) * 3 +
+            CAST(COALESCE(gd.bc_count, '0') AS REAL) * 2.5 +
+            CAST(COALESCE(gd.c_count, '0') AS REAL) * 2 +
+            CAST(COALESCE(gd.d_count, '0') AS REAL)
+        )
+        /
+        NULLIF(
+            SUM(
+                CAST(COALESCE(gd.a_count, '0') AS REAL) +
+                CAST(COALESCE(gd.ab_count, '0') AS REAL) +
+                CAST(COALESCE(gd.b_count, '0') AS REAL) +
+                CAST(COALESCE(gd.bc_count, '0') AS REAL) +
+                CAST(COALESCE(gd.c_count, '0') AS REAL) +
+                CAST(COALESCE(gd.d_count, '0') AS REAL) +
+                CAST(COALESCE(gd.f_count, '0') AS REAL)
+            ),
+            0
+        ) AS gpa
+
+    FROM grade_distributions AS gd
+
+    INNER JOIN stat_offerings AS so
+      ON so.course_offering_uuid = gd.course_offering_uuid
+
+    GROUP BY gd.course_offering_uuid
+  ),
+
+  disciplina_gpa AS (
+    SELECT
+        c.uuid,
+        c.number,
+        c.name,
+        AVG(go.gpa) AS gpa_medio
+
+    FROM gpa_oferecimentos AS go
+
+    INNER JOIN course_offerings AS co
+      ON co.uuid = go.course_offering_uuid
+
+    INNER JOIN courses AS c
+      ON c.uuid = co.course_uuid
+
+    WHERE go.gpa IS NOT NULL
+
+    GROUP BY c.uuid, c.number, c.name
+  )
+
+  SELECT
+      number,
+      name,
+      gpa_medio
+  FROM disciplina_gpa
+  WHERE gpa_medio = (SELECT MIN(gpa_medio) FROM disciplina_gpa)
+  "
+)
+
+disciplina_dificil
+```
+
+Qual é a disciplina mais fácil?
+
+```{r}
+disciplina_facil <- dbGetQuery(
+  conn,
+  "
+  WITH stat_offerings AS (
+    SELECT DISTINCT
+        sm.course_offering_uuid
+    FROM subject_memberships AS sm
+    INNER JOIN subjects AS s
+      ON s.code = sm.subject_code
+    WHERE s.abbreviation = 'STAT'
+  ),
+
+  gpa_oferecimentos AS (
+    SELECT
+        gd.course_offering_uuid,
+
+        SUM(
+            CAST(COALESCE(gd.a_count, '0') AS REAL) * 4 +
+            CAST(COALESCE(gd.ab_count, '0') AS REAL) * 3.5 +
+            CAST(COALESCE(gd.b_count, '0') AS REAL) * 3 +
+            CAST(COALESCE(gd.bc_count, '0') AS REAL) * 2.5 +
+            CAST(COALESCE(gd.c_count, '0') AS REAL) * 2 +
+            CAST(COALESCE(gd.d_count, '0') AS REAL)
+        )
+        /
+        NULLIF(
+            SUM(
+                CAST(COALESCE(gd.a_count, '0') AS REAL) +
+                CAST(COALESCE(gd.ab_count, '0') AS REAL) +
+                CAST(COALESCE(gd.b_count, '0') AS REAL) +
+                CAST(COALESCE(gd.bc_count, '0') AS REAL) +
+                CAST(COALESCE(gd.c_count, '0') AS REAL) +
+                CAST(COALESCE(gd.d_count, '0') AS REAL) +
+                CAST(COALESCE(gd.f_count, '0') AS REAL)
+            ),
+            0
+        ) AS gpa
+
+    FROM grade_distributions AS gd
+
+    INNER JOIN stat_offerings AS so
+      ON so.course_offering_uuid = gd.course_offering_uuid
+
+    GROUP BY gd.course_offering_uuid
+  ),
+
+  disciplina_gpa AS (
+    SELECT
+        c.uuid,
+        c.number,
+        c.name,
+        AVG(go.gpa) AS gpa_medio
+
+    FROM gpa_oferecimentos AS go
+
+    INNER JOIN course_offerings AS co
+      ON co.uuid = go.course_offering_uuid
+
+    INNER JOIN courses AS c
+      ON c.uuid = co.course_uuid
+
+    WHERE go.gpa IS NOT NULL
+
+    GROUP BY c.uuid, c.number, c.name
+  )
+
+  SELECT
+      number,
+      name,
+      gpa_medio
+  FROM disciplina_gpa
+  WHERE gpa_medio = (SELECT MAX(gpa_medio) FROM disciplina_gpa)
+  "
+)
+
+disciplina_facil
+```
+
+Para determinar os professores e disciplinas com os maiores e menores desempenhos médios, inicialmente foi calculada a nota média de cada oferecimento de disciplinas do assunto STAT. Para isso, os conceitos A, AB, B, BC, C, D e F foram convertidos, respectivamente, para 4, 3,5, 3, 2,5, 2, 1 e 0, e foi calculada uma média ponderada pela quantidade de alunos em cada conceito. Os oferecimentos sem alunos com conceitos entre A e F foram desconsiderados do cálculo.
+
+A partir dessas médias, foram calculadas as médias dos oferecimentos associados a cada professor e a cada disciplina. O menor GPA médio entre os professores foi obtido por JAMES D KUELBS, com GPA igual a 2,607692. Para o maior GPA houve empate entre SRIKANTHMADHAVAN ARAVAMUTHAN, GUANHUA CHEN e YAJUAN SI, todos com GPA igual a 4,000000.
+
+Considerando as disciplinas, o menor GPA médio foi observado em STAT 431 — Introduction to the Theory of Probability, com média 2,878070. Já o maior GPA médio foi igual a 4,000000, ocorrendo empate entre as disciplinas STAT 628 — Data Science Practicum, STAT 811 — Sample Survey Theory and Method, STAT 834 — Empir Proc&Semiparmtrc Infernc e STAT 841 — Nonparametric Statistics and Machine Learning Methods.
+
+```{r}
+dbDisconnect(conn)
+```
+
+```{r}
+Sys.setenv(TZ = "America/Sao_Paulo")
+Sys.time()
+
+```
