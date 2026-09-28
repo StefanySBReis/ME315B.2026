@@ -95,6 +95,7 @@ gpa_oferecimentos <- dbGetQuery(
 
 gpa_oferecimentos
 ```
+
 Quem é o professor mais difícil?
 
 ```{r}
